@@ -100,6 +100,12 @@ jobs:
           NEW_VERSION: ${{ steps.upstream.outputs.version }}
         run: |
           # Tag pushes from GITHUB_TOKEN do NOT trigger other workflows.
-          # workflow_dispatch via the REST API is not subject to that restriction,
-          # so we explicitly dispatch the build with the new tag as the ref.
-          gh workflow run build-rpm.yml --ref "v${NEW_VERSION}"
+          # workflow_dispatch via the REST API is not subject to that restriction.
+          # We pass upstream_version and create_release=true explicitly because
+          # github.ref for a workflow_dispatch may not resolve as refs/tags/...
+          # even when --ref points to a tag, so the release condition cannot rely
+          # solely on startsWith(github.ref, 'refs/tags/v').
+          gh workflow run build-rpm.yml \
+            --ref "v${NEW_VERSION}" \
+            -f upstream_version="${NEW_VERSION}" \
+            -f create_release=true
