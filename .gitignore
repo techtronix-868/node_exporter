@@ -1,0 +1,12 @@
+# Editor swap files
+*.swp
+*.swo
+*~
+.*.un~
+
+# Downloaded tarballs (fetched at build time)
+SOURCES/*.tar.gz
+
+# Local rpmbuild output
+rpmbuild/
+dist/

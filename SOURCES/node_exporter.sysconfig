@@ -1,0 +1,6 @@
+# Extra CLI flags passed to node_exporter on startup.
+# See: node_exporter --help
+#
+# Example — enable textfile collector and restrict listeners:
+#   NODE_EXPORTER_OPTS="--collector.textfile.directory=/var/lib/node_exporter/textfile_collector --web.listen-address=:9100"
+NODE_EXPORTER_OPTS="--collector.textfile.directory=/var/lib/node_exporter/textfile_collector"

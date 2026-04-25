@@ -1,0 +1,197 @@
+name: Build node_exporter RPM
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*"           # e.g. v1.11.1, v1.11.1-1 (upstream-version[-rpm-release])
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      upstream_version:
+        description: "node_exporter upstream version (e.g. 1.11.1)"
+        required: false
+        default: ""
+
+env:
+  # Fallback version used when not driven by a tag or manual input.
+  # Keep in sync with SPECS/node_exporter.spec.
+  DEFAULT_VERSION: "1.11.1"
+
+jobs:
+  # ------------------------------------------------------------------
+  # 1. Resolve the version to build
+  # ------------------------------------------------------------------
+  resolve-version:
+    runs-on: ubuntu-latest
+    outputs:
+      upstream_version: ${{ steps.ver.outputs.upstream_version }}
+      rpm_release:      ${{ steps.ver.outputs.rpm_release }}
+    steps:
+      - name: Determine version
+        id: ver
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.upstream_version }}" ]]; then
+            UPSTREAM="${{ inputs.upstream_version }}"
+            RPM_RELEASE="1"
+          elif [[ "${GITHUB_REF}" =~ ^refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)-([0-9]+)$ ]]; then
+            # tag like v1.11.1-2  →  upstream=1.11.1, rpm_release=2
+            UPSTREAM="${BASH_REMATCH[1]}"
+            RPM_RELEASE="${BASH_REMATCH[2]}"
+          elif [[ "${GITHUB_REF}" =~ ^refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            # tag like v1.11.1  →  upstream=1.11.1, rpm_release=1
+            UPSTREAM="${BASH_REMATCH[1]}"
+            RPM_RELEASE="1"
+          else
+            UPSTREAM="${DEFAULT_VERSION}"
+            RPM_RELEASE="1"
+          fi
+          echo "upstream_version=${UPSTREAM}" >> "$GITHUB_OUTPUT"
+          echo "rpm_release=${RPM_RELEASE}"   >> "$GITHUB_OUTPUT"
+          echo "Building node_exporter ${UPSTREAM}-${RPM_RELEASE}"
+
+  # ------------------------------------------------------------------
+  # 2. Build RPM inside each target distro container
+  # ------------------------------------------------------------------
+  build-rpm:
+    needs: resolve-version
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: almalinux8
+            image: almalinux:8
+            dist_tag: el8
+          - distro: almalinux9
+            image: almalinux:9
+            dist_tag: el9
+          - distro: almalinux10
+            image: almalinux:10
+            dist_tag: el10
+
+    container:
+      image: ${{ matrix.image }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ---- install build tools ----------------------------------------
+      - name: Install RPM build dependencies
+        run: |
+          if command -v dnf5 &>/dev/null; then
+            PM=dnf5
+          else
+            PM=dnf
+          fi
+          $PM install -y rpm-build rpmdevtools wget tar
+
+      # ---- download upstream tarball ----------------------------------
+      - name: Download node_exporter tarball
+        env:
+          UPSTREAM: ${{ needs.resolve-version.outputs.upstream_version }}
+        run: |
+          URL="https://github.com/prometheus/node_exporter/releases/download/v${UPSTREAM}/node_exporter-${UPSTREAM}.linux-amd64.tar.gz"
+          echo "Fetching ${URL}"
+          wget -q --show-progress -O "SOURCES/node_exporter-${UPSTREAM}.linux-amd64.tar.gz" "${URL}"
+
+      # ---- prepare rpmbuild tree --------------------------------------
+      - name: Set up rpmbuild tree
+        run: |
+          rpmdev-setuptree
+          cp SOURCES/* ~/rpmbuild/SOURCES/
+          cp SPECS/node_exporter.spec ~/rpmbuild/SPECS/
+
+      # ---- patch spec with resolved version / release -----------------
+      - name: Patch spec version
+        env:
+          UPSTREAM: ${{ needs.resolve-version.outputs.upstream_version }}
+          RPM_RELEASE: ${{ needs.resolve-version.outputs.rpm_release }}
+        run: |
+          sed -i \
+            -e "s/^%global upstream_version .*/%global upstream_version ${UPSTREAM}/" \
+            -e "s/^Release:.*/Release: ${RPM_RELEASE}%{?dist}/" \
+            ~/rpmbuild/SPECS/node_exporter.spec
+
+      # ---- build the RPM ----------------------------------------------
+      - name: Build RPM
+        env:
+          DIST_TAG: ${{ matrix.dist_tag }}
+        run: |
+          rpmbuild -bb \
+            --define "dist .${DIST_TAG}" \
+            ~/rpmbuild/SPECS/node_exporter.spec
+
+      # ---- collect artifacts ------------------------------------------
+      - name: Collect RPM artifacts
+        run: |
+          mkdir -p dist
+          find ~/rpmbuild/RPMS -name '*.rpm' -exec cp {} dist/ \;
+          ls -lh dist/
+
+      - name: Upload RPM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-${{ matrix.distro }}
+          path: dist/*.rpm
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # 3. Publish a GitHub Release on version tags
+  # ------------------------------------------------------------------
+  release:
+    needs: [resolve-version, build-rpm]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all RPM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List collected RPMs
+        run: ls -lh dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "node_exporter ${{ needs.resolve-version.outputs.upstream_version }}-${{ needs.resolve-version.outputs.rpm_release }}"
+          body: |
+            ## node_exporter RPM packages
+
+            Upstream version: **${{ needs.resolve-version.outputs.upstream_version }}**
+            RPM release: **${{ needs.resolve-version.outputs.rpm_release }}**
+
+            ### Packages
+            | File | Target |
+            |------|--------|
+            | `node_exporter-*.el8.x86_64.rpm` | RHEL / AlmaLinux 8 |
+            | `node_exporter-*.el9.x86_64.rpm` | RHEL / AlmaLinux 9 |
+            | `node_exporter-*.el10.x86_64.rpm` | RHEL / AlmaLinux 10 |
+
+            ### Install
+            ```bash
+            # RHEL/AlmaLinux 8
+            sudo rpm -ivh node_exporter-${{ needs.resolve-version.outputs.upstream_version }}-${{ needs.resolve-version.outputs.rpm_release }}.el8.x86_64.rpm
+
+            # RHEL/AlmaLinux 9
+            sudo rpm -ivh node_exporter-${{ needs.resolve-version.outputs.upstream_version }}-${{ needs.resolve-version.outputs.rpm_release }}.el9.x86_64.rpm
+
+            # RHEL/AlmaLinux 10
+            sudo rpm -ivh node_exporter-${{ needs.resolve-version.outputs.upstream_version }}-${{ needs.resolve-version.outputs.rpm_release }}.el10.x86_64.rpm
+            ```
+
+            ### Post-install
+            ```bash
+            sudo systemctl daemon-reload
+            sudo systemctl enable --now node_exporter
+            ```
+          files: dist/*.rpm
+          draft: false
+          prerelease: false

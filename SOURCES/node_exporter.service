@@ -1,0 +1,26 @@
+[Unit]
+Description=Prometheus Node Exporter
+Documentation=https://github.com/prometheus/node_exporter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=node_exporter
+Group=node_exporter
+Type=simple
+Restart=on-failure
+RestartSec=5s
+
+EnvironmentFile=-/etc/sysconfig/node_exporter
+ExecStart=/usr/bin/node_exporter $NODE_EXPORTER_OPTS
+
+# Security hardening
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/node_exporter/textfile_collector
+PrivateTmp=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
