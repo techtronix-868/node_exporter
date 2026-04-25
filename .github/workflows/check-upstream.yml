@@ -2,7 +2,6 @@ name: Check for new upstream releases
 
 on:
   schedule:
-    # Run daily at 06:00 UTC
     - cron: "0 6 * * *"
   workflow_dispatch:
 
@@ -41,9 +40,44 @@ jobs:
             echo "needed=true" >> "$GITHUB_OUTPUT"
           else
             echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "Already up to date: ${{ steps.current.outputs.version }}"
           fi
 
-      - name: Update spec and push tag
+      - name: Install git-cliff
+        if: steps.needs_update.outputs.needed == 'true'
+        run: |
+          curl -sSL "https://github.com/orhun/git-cliff/releases/download/v2.4.0/git-cliff-2.4.0-x86_64-unknown-linux-gnu.tar.gz" \
+            -o /tmp/git-cliff.tar.gz
+          tar -xzf /tmp/git-cliff.tar.gz -C /tmp
+          sudo install -m 755 "/tmp/git-cliff-2.4.0-x86_64-unknown-linux-gnu/git-cliff" /usr/local/bin/git-cliff
+
+      - name: Update spec file
+        if: steps.needs_update.outputs.needed == 'true'
+        env:
+          NEW_VERSION: ${{ steps.upstream.outputs.version }}
+        run: |
+          DATE=$(date "+%a %b %d %Y")
+
+          # Update tracked version
+          sed -i "s/^%global upstream_version .*/%global upstream_version ${NEW_VERSION}/" \
+            SPECS/node_exporter.spec
+
+          # Prepend RPM changelog entry (required by rpmbuild)
+          ENTRY="* ${DATE} github-actions[bot] <github-actions[bot]@users.noreply.github.com> - ${NEW_VERSION}-1\n- Bump to upstream ${NEW_VERSION}\n"
+          sed -i "/^%changelog/a\\${ENTRY}" SPECS/node_exporter.spec
+
+      - name: Update CHANGELOG.md
+        if: steps.needs_update.outputs.needed == 'true'
+        env:
+          NEW_VERSION: ${{ steps.upstream.outputs.version }}
+        run: |
+          # --unreleased --tag treats current HEAD commits as the new version;
+          # --prepend adds the new entry at the top of the existing CHANGELOG.md
+          git-cliff --config cliff.toml \
+            --unreleased --tag "v${NEW_VERSION}" \
+            --prepend CHANGELOG.md
+
+      - name: Commit and push
         if: steps.needs_update.outputs.needed == 'true'
         env:
           NEW_VERSION: ${{ steps.upstream.outputs.version }}
@@ -52,19 +86,20 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Update the upstream_version in the spec
-          sed -i "s/^%global upstream_version .*/%global upstream_version ${NEW_VERSION}/" \
-            SPECS/node_exporter.spec
-
-          # Prepend a changelog entry
-          DATE=$(date "+%a %b %d %Y")
-          CHANGELOG_ENTRY="* ${DATE} CI Pipeline <ci@example.com> - ${NEW_VERSION}-1\n- Bump to upstream ${NEW_VERSION}\n"
-          sed -i "/^%changelog/a\\${CHANGELOG_ENTRY}" SPECS/node_exporter.spec
-
-          git add SPECS/node_exporter.spec
+          git add SPECS/node_exporter.spec CHANGELOG.md
           git commit -m "chore: bump node_exporter to v${NEW_VERSION}"
           git push origin main
 
-          # Push a version tag — this triggers build-rpm.yml
           git tag "v${NEW_VERSION}"
           git push origin "v${NEW_VERSION}"
+
+      - name: Dispatch RPM build and release
+        if: steps.needs_update.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ steps.upstream.outputs.version }}
+        run: |
+          # Tag pushes from GITHUB_TOKEN do NOT trigger other workflows.
+          # workflow_dispatch via the REST API is not subject to that restriction,
+          # so we explicitly dispatch the build with the new tag as the ref.
+          gh workflow run build-rpm.yml --ref "v${NEW_VERSION}"

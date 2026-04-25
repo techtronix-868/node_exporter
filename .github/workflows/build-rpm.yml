@@ -149,30 +149,39 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download all RPM artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
-      - name: List collected RPMs
-        run: ls -lh dist/
+      - name: Generate release notes
+        uses: orhun/git-cliff-action@v3
+        id: cliff
+        with:
+          config: cliff.toml
+          args: --latest --strip header
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: "node_exporter ${{ needs.resolve-version.outputs.upstream_version }}-${{ needs.resolve-version.outputs.rpm_release }}"
           body: |
-            ## node_exporter RPM packages
+            ${{ steps.cliff.outputs.content }}
 
-            Upstream version: **${{ needs.resolve-version.outputs.upstream_version }}**
-            RPM release: **${{ needs.resolve-version.outputs.rpm_release }}**
+            ---
 
             ### Packages
+
             | File | Target |
             |------|--------|
-            | `node_exporter-*.el8.x86_64.rpm` | RHEL / AlmaLinux 8 |
-            | `node_exporter-*.el9.x86_64.rpm` | RHEL / AlmaLinux 9 |
+            | `node_exporter-*.el8.x86_64.rpm`  | RHEL / AlmaLinux 8  |
+            | `node_exporter-*.el9.x86_64.rpm`  | RHEL / AlmaLinux 9  |
             | `node_exporter-*.el10.x86_64.rpm` | RHEL / AlmaLinux 10 |
 
             ### Install
